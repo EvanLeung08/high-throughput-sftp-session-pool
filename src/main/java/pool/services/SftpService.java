@@ -4,7 +4,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import pool.dataobject.SftpConfig;
 import pool.repositories.SftpConfigRepository;
-import pool.demo.TestThread;
+import pool.demo.SftpFileProcessThread;
 import pool.common.utils.SftpSessionPool;
 
 import java.util.List;
@@ -32,7 +32,7 @@ public class SftpService {
             map.put(config.getHost() + config.getUsername(), new SftpSessionPool(config.getMaxSessions(), config.getMaxChannels()));
             //Simulate each sftp profile is being used by multiple threads for file process
             for (int i = 0; i < 3; i++) {
-                TestThread thread = new TestThread(map.get(config.getHost() + config.getUsername()), config.getHost(), config.getUsername(), config.getPassword(), testPath);
+                SftpFileProcessThread thread = new SftpFileProcessThread(map.get(config.getHost() + config.getUsername()), config.getHost(), config.getUsername(), config.getPassword(), testPath);
                 thread.start();
             }
         }
