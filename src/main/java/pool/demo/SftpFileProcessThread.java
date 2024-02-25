@@ -16,13 +16,15 @@ public class SftpFileProcessThread extends Thread {
     private int maxRetries = 3;
     private SftpSessionPool pool;
     private String host;
+    private int port;
     private String username;
     private String password;
     private String remoteSftpPath;
 
-    public SftpFileProcessThread(SftpSessionPool pool, String host, String username, String password, String remoteSftpPath, int maxRetries) {
+    public SftpFileProcessThread(SftpSessionPool pool, String host, int port, String username, String password, String remoteSftpPath, int maxRetries) {
         this.pool = pool;
         this.host = host;
+        this.port = port;
         this.username = username;
         this.password = password;
         this.remoteSftpPath = remoteSftpPath;
@@ -37,7 +39,7 @@ public class SftpFileProcessThread extends Thread {
             while (true) {
                 try {
                     // session = pool.getSession(host, username, password, 10, TimeUnit.SECONDS);
-                    session = pool.getSessionWithKeyLock(host, username, password, 10, TimeUnit.SECONDS, host + ":" + username); //get session with lock
+                    session = pool.getSessionWithKeyLock(host, port, username, password, 10, TimeUnit.SECONDS, host + ":" + username); //get session with lock
                     break; // if getSession() is successful, break the loop
                 } catch (NoAvailableSessionException e) {
                     if (++retries > this.maxRetries) {

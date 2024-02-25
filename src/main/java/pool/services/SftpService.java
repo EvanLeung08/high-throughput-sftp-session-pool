@@ -2,6 +2,7 @@ package pool.services;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
+import pool.common.utils.SftpConnectionBuilder;
 import pool.dataobject.SftpConfig;
 import pool.repositories.SftpConfigRepository;
 import pool.demo.SftpFileProcessThread;
@@ -16,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SftpService {
 
     private final SftpConfigRepository sftpConfigRepository;
-    final static Map<String, SftpSessionPool> map = new ConcurrentHashMap();
+    // final static Map<String, SftpSessionPool> map = new ConcurrentHashMap();
 
     public SftpService(SftpConfigRepository sftpConfigRepository) {
         this.sftpConfigRepository = sftpConfigRepository;
@@ -32,10 +33,11 @@ public class SftpService {
         // Initialize a connection pool for each config
         for (SftpConfig config : configs) {
             log.info("config->{}", config);
-            map.put(config.getHost() + config.getUsername(), new SftpSessionPool(config.getMaxSessions(), config.getMaxChannels()));
+            //map.put(config.getHost() + config.getUsername(), new SftpSessionPool(config.getMaxSessions(), config.getMaxChannels()));
+            SftpSessionPool sessionPool = SftpConnectionBuilder.getInstance(config.getMaxSessions(), config.getMaxChannels()).getSessionPool(config.getHost(), 22, config.getUsername());
             //Simulate each sftp profile is being used by multiple threads for file process
             for (int i = 0; i < max_concurrent_opening_files; i++) {
-                SftpFileProcessThread thread = new SftpFileProcessThread(map.get(config.getHost() + config.getUsername()), config.getHost(), config.getUsername(), config.getPassword(), testPath, 0);
+                SftpFileProcessThread thread = new SftpFileProcessThread(sessionPool, config.getHost(), config.getPort(), config.getUsername(), config.getPassword(), testPath, 0);
                 thread.start();
             }
         }

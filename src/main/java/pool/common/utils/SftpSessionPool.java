@@ -29,33 +29,33 @@ public class SftpSessionPool {
         this.maxSessionsPerHostSemaphore = new Semaphore(maxSessionsPerHost, true);
     }
 
-    public Session getSessionWithKeyLock(String host, String username, String password, long timeout, TimeUnit unit, String lockKey) throws JSchException, InterruptedException {
-        String sessionKey = host + ":" + username;
+    public Session getSessionWithKeyLock(String host, int port, String username, String password, long timeout, TimeUnit unit, String lockKey) throws JSchException, InterruptedException {
+        String sessionKey = host + ":" + port + ":" + username;
         if (StringUtils.hasLength(lockKey)) {
             // waiting for the available lock
             while (!lock.lock(lockKey)) {
                 Thread.sleep(1000); // wait a bit before retrying
                 log.debug("Thread {} failed to get lock ", Thread.currentThread().getId());
             }
-            log.info("Thread {} get lock successfully", Thread.currentThread().getId());
+            log.debug("Thread {} get lock successfully", Thread.currentThread().getId());
         }
         try {
-            return getSessionFromPool(host, username, password, timeout, unit, sessionKey);
+            return getSessionFromPool(host, port, username, password, timeout, unit, sessionKey);
         } finally {
             if (StringUtils.hasLength(lockKey)) {
                 lock.unlock(lockKey);
-                log.info("Thread {} release lock successfully", Thread.currentThread().getId());
+                log.debug("Thread {} release lock successfully", Thread.currentThread().getId());
             }
         }
 
     }
 
-    public Session getSession(String host, String username, String password, long timeout, TimeUnit unit) throws JSchException, InterruptedException {
-        String sessionKey = host + ":" + username;
-        return getSessionFromPool(host, username, password, timeout, unit, sessionKey);
+    public Session getSession(String host, int port, String username, String password, long timeout, TimeUnit unit) throws JSchException, InterruptedException {
+        String sessionKey = host + ":" + port + ":" + username;
+        return getSessionFromPool(host, port, username, password, timeout, unit, sessionKey);
     }
 
-    private Session getSessionFromPool(String host, String username, String password, long timeout, TimeUnit unit, String sessionKey) throws JSchException, InterruptedException {
+    private Session getSessionFromPool(String host, int port, String username, String password, long timeout, TimeUnit unit, String sessionKey) throws JSchException, InterruptedException {
         ConcurrentLinkedQueue<Session> hostSessions = sessions.computeIfAbsent(sessionKey, k -> new ConcurrentLinkedQueue<>());
         long endTime = System.nanoTime() + unit.toNanos(timeout);
 
@@ -79,7 +79,7 @@ public class SftpSessionPool {
 
             if (maxSessionsPerHostSemaphore.tryAcquire()) {
                 try {
-                    Session session = createNewSession(host, username, password);
+                    Session session = createNewSession(host, port, username, password);
                     hostSessions.add(session);
                     channelCounts.put(session, new Semaphore(maxChannelsPerSession - 1)); // one channel is already in use
                     return session;
@@ -96,9 +96,9 @@ public class SftpSessionPool {
     }
 
 
-    private Session createNewSession(String host, String username, String password) throws JSchException {
+    private Session createNewSession(String host, int port, String username, String password) throws JSchException {
         JSch jsch = new JSch();
-        Session session = jsch.getSession(username, host);
+        Session session = jsch.getSession(username, host, port);
         session.setPassword(password);
         session.setConfig("StrictHostKeyChecking", "no"); // Enable StrictHostKeyChecking
         session.setTimeout(5000); // Set connection timeout to 5 seconds

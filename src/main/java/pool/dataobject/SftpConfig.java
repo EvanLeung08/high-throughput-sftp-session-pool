@@ -18,6 +18,8 @@ public class SftpConfig {
     private Long id;
     @Column(name = "HOST")
     private String host;
+    @Column(name = "PORT")
+    private int port;
     @Column(name = "USERNAME")
     private String username;
     @Column(name = "PASSWORD")
