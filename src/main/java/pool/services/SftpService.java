@@ -25,14 +25,17 @@ public class SftpService {
     public void initializeConnectionPools() {
         // Load all SFTP configs from the database
         List<SftpConfig> configs = sftpConfigRepository.findAll();
-        String testPath = "/tmp/evan";
+        //Indicate how many files need to be processed in the same time
+        int max_concurrent_opening_files = 5;
+
+        String testPath = "/";
         // Initialize a connection pool for each config
         for (SftpConfig config : configs) {
             log.info("config->{}", config);
             map.put(config.getHost() + config.getUsername(), new SftpSessionPool(config.getMaxSessions(), config.getMaxChannels()));
             //Simulate each sftp profile is being used by multiple threads for file process
-            for (int i = 0; i < 3; i++) {
-                SftpFileProcessThread thread = new SftpFileProcessThread(map.get(config.getHost() + config.getUsername()), config.getHost(), config.getUsername(), config.getPassword(), testPath);
+            for (int i = 0; i < max_concurrent_opening_files; i++) {
+                SftpFileProcessThread thread = new SftpFileProcessThread(map.get(config.getHost() + config.getUsername()), config.getHost(), config.getUsername(), config.getPassword(), testPath, 0);
                 thread.start();
             }
         }

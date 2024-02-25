@@ -13,19 +13,20 @@ import java.util.concurrent.TimeUnit;
 
 @Slf4j
 public class SftpFileProcessThread extends Thread {
-    private static final int MAX_RETRIES = 3;
+    private int maxRetries = 3;
     private SftpSessionPool pool;
     private String host;
     private String username;
     private String password;
     private String remoteSftpPath;
 
-    public SftpFileProcessThread(SftpSessionPool pool, String host, String username, String password, String remoteSftpPath) {
+    public SftpFileProcessThread(SftpSessionPool pool, String host, String username, String password, String remoteSftpPath, int maxRetries) {
         this.pool = pool;
         this.host = host;
         this.username = username;
         this.password = password;
         this.remoteSftpPath = remoteSftpPath;
+        this.maxRetries = maxRetries;
     }
 
     public void run() {
@@ -35,10 +36,11 @@ public class SftpFileProcessThread extends Thread {
             int retries = 0;
             while (true) {
                 try {
-                    session = pool.getSession(host, username, password, 1, TimeUnit.SECONDS);
+                    // session = pool.getSession(host, username, password, 10, TimeUnit.SECONDS);
+                    session = pool.getSessionWithKeyLock(host, username, password, 10, TimeUnit.SECONDS, host + ":" + username); //get session with lock
                     break; // if getSession() is successful, break the loop
                 } catch (NoAvailableSessionException e) {
-                    if (++retries > MAX_RETRIES) {
+                    if (++retries > this.maxRetries) {
                         throw e; // if exceeded max retries, rethrow the exception
                     }
                     log.info("Thread {}:Failed to get session in this round. Start to retry now. Current retry count is {}. Request session detail: {}", this.getId(), retries, this.host + ":" + this.username);
@@ -48,7 +50,7 @@ public class SftpFileProcessThread extends Thread {
             }
             log.info("Thread {} got session {}. Session detail: {}", this.getId(), session, session.getHost() + ":" + session.getUserName());
 
-            channelSftp = (ChannelSftp) session.openChannel("sftp");
+            channelSftp = pool.getChannel(session);
             channelSftp.connect();
             // ... use the session and channel
             Vector<ChannelSftp.LsEntry> list = channelSftp.ls(this.remoteSftpPath);
@@ -61,11 +63,11 @@ public class SftpFileProcessThread extends Thread {
             log.error("Thread {} failed to process", this.getId(), e);
         } finally {
             if (channelSftp != null) {
-                channelSftp.disconnect();
+                //  channelSftp.disconnect();
             }
             if (session != null) {
-                pool.closeSession(session);
-                log.info("Thread {} closed session {}. Session detail: {}", this.getId(), session, this.host + ":" + this.username);
+                //  pool.closeSession(session);
+                //  log.info("Thread {} closed session {}. Session detail: {}", this.getId(), session, this.host + ":" + this.username);
             }
         }
     }

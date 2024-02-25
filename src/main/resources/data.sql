@@ -1,3 +1,3 @@
 INSERT INTO SFTP_CONFIG (HOST, USERNAME, PASSWORD, MAXSESSIONS, MAXCHANNELS) VALUES
-('192.168.50.33', 'parallels', 'Lyh120271083', 1, 2),
-('192.168.50.57', 'parallels', 'Lyh120271083', 1, 2);
+--('192.168.50.33', 'parallels', 'test8808',2, 5),
+('192.168.50.57', 'parallels', 'test8808', 3, 1);
