@@ -1,6 +1,6 @@
 # 背景
 
-在现代的数据驱动环境中，安全文件传输协议（SFTP）扮演着至关重要的角色，它提供了一种安全、可靠的文件传输方式。我们目前项目是一个大型数据集成平台，跟上下游有很多文件对接是通过SFTP协议，当需要处理大量文件或进行大规模数据迁移时，我们常常会遇到因上下游服务器的限制导致连接访问被中断或者文件传输中断，大大影响系统的文件传输效率。常见的报错例 ``com.jcraft.jsch.JSchException: Session.connect: java.net.SocketException: Connection reset``、``com.jcraft.jsch.JSchException: connection is closed by foreign host``、``com.jcraft.jsch.JSchException: session is down``、``com.jcraft.jsch.JSchException: channel is not opened`` 等。这些连接问题也一直困扰着我们，那我们有没有办法在上下游有限的资源去最大提高文件并行处理能力呢？目前网上的线程池方案只是简单解决了``SSH Session``复用，但是并没有解决同一个``SSH Session``对象中的``SFTP Channel``复用问题，所以当文件量大的时候，还是会因为服务器的``SSH Session``数量限制从而影响文件并行传输效率。最节省资源又能提高文件并行处理方式的做法应该是同时复用``SSH Session``以及其``SFTP Channel``，这样最大并行可以处理的文件数就是 ``SSH Session数*SFTP Channel数``，而不是直接每个文件处理线程开启一个``SSH Session``，只复用``SSH Session``。
+在现代的数据驱动环境中，安全文件传输协议（SFTP）扮演着至关重要的角色，它提供了一种安全、可靠的文件传输方式。我们目前项目是一个大型数据集成平台，跟上下游有很多文件对接是通过SFTP协议，当需要处理大量文件或进行大规模数据迁移时，我们常常会遇到因上下游服务器的限制导致连接访问被中断或者文件传输中断，大大影响系统的文件传输效率。常见的报错例 ``com.jcraft.jsch.JSchException: Session.connect: java.net.SocketException: Connection reset``、``com.jcraft.jsch.JSchException: connection is closed by foreign host``、``com.jcraft.jsch.JSchException: session is down``、``com.jcraft.jsch.JSchException: channel is not opened`` 等。这些连接问题也一直困扰着我们，那我们有没有办法在上下游有限的资源去最大提高文件并行处理能力呢？目前网上的连接池方案只是简单解决了``SSH Session``复用，但是并没有解决同一个``SSH Session``对象中的``SFTP Channel``复用问题，所以当文件量大的时候，还是会因为服务器的``SSH Session``数量限制从而影响文件并行传输效率。最节省资源又能提高文件并行处理方式的做法应该是同时复用``SSH Session``以及其``SFTP Channel``，这样最大并行可以处理的文件数就是 ``SSH Session数*SFTP Channel数``，而不是直接每个文件处理线程开启一个``SSH Session``，只复用``SSH Session``。
 
 # 问题原因
 所有上下游的SFTP服务器都是连接限制，一般来说默认情况下，常见的Linux服务器默认``MaxSessions``是``10``，``MaxStartups``是``10:30:60``。
@@ -72,7 +72,7 @@
 
 # 解决方案
 
-基于前文提到的思路，我们已经有了可配置连接池的雏形，抽象出来的线程池模型需要符合如下条件:
+基于前文提到的思路，我们已经有了可配置连接池的雏形，抽象出来的连接池模型需要符合如下条件:
 1.	为每台对接的SFTP服务器同一时间不能分配超过``X``个``SSH Session``
 2.	为每台对接的SFTP服务器分配的每个``SSH Session``最多只能建立``Y``个``SFTP Channel``
 3. 为每台对接的SFTP服务器分配的``SSH Session``连接池是隔离的，不会互相竞争
@@ -81,13 +81,13 @@
 
 为了避免连接池浪费``SSH Session``资源，我们还需要做进一步优化，就是要限制每个``SSH Session``需要创建满``Y``个``SFTP Channel``才创建一个新的``SSH Session``，而不是每次请求都先创建一个新的``SSH Session``，这样会导致每个``SSH Session``都没被充分利用，而且也会增加系统的负担。
 
-**优化后的线程池模型如下：**
+**优化后的连接池模型如下：**
 1.	为每台对接的SFTP服务器同一时间不能分配超过``X``个``SSH Session``
 2.	为每台对接的SFTP服务器分配的每个SSH Session最多只能建立``Y``个``SFTP Channel``
 3. 为每台对接的SFTP服务器分配的``SSH Session``连接池是隔离的，不会互相竞争
 4. 多个线程请求获取对某台SFTP服务器``SSH Session``时，如果当前``SSH Session``池中的第一个Session的``SFTP Channel`` 数还没超过``Y``，则会返回同一个``SSH Session``实例，假如当前的``SSH Session``池的第一个``Session``创建的``SFTP Channel``数已经超过配置的``Y``值，则创建第二个``SSH Session``，如此类推，直到创建第N个``SSH Session``，N <``X``
 
-对于每个上游分配的线程池请求流程如下:
+对于每个上游分配的连接池请求流程如下:
 ![AI生产那个的流程图](https://img-blog.csdnimg.cn/direct/179340b78a8d44e7a0a91d341488fd68.png)
 
 # 代码实现
@@ -490,7 +490,7 @@ INSERT INTO SFTP_CONFIG (HOST, PORT, USERNAME, PASSWORD, MAXSESSIONS, MAXCHANNEL
 2024-03-09 01:24:07.185  INFO 58516 --- [      Thread-10] pool.demo.SftpFileProcessThread          : Thread 42 closed session com.jcraft.jsch.Session@17e2aaef. Session detail: 192.168.50.58:parallels
 
 ```
-从以上日志可以看出，**10**条线程虽然都并行持有相同的SFTP连接信息请求连接池，但是只会获取到**2**个``SFTP Session``实例而不是**10**个``SFTP Session``，并且当连接池里的``SSH Session``持有的``Channel``还没有达到配置的上限**5**个时，只会分配同一个``SSH Session``实例，当前连接池里的``SSH Session``对象持有的``Channel``超过**5**才会分配下一个``SFTP Session``对象，来确保``SFTP Session``不会浪费。因此目前线程池是符合我们预期想要的效果。
+从以上日志可以看出，**10**条线程虽然都并行持有相同的SFTP连接信息请求连接池，但是只会获取到**2**个``SFTP Session``实例而不是**10**个``SFTP Session``，并且当连接池里的``SSH Session``持有的``Channel``还没有达到配置的上限**5**个时，只会分配同一个``SSH Session``实例，当前连接池里的``SSH Session``对象持有的``Channel``超过**5**才会分配下一个``SFTP Session``对象，来确保``SFTP Session``不会浪费。因此目前连接池是符合我们预期想要的效果。
  
  ## 2.测试连接池配置上限超过服务器``Channel``限制的异常情况
  
@@ -578,7 +578,7 @@ Caused by: java.net.SocketException: Connection reset
 https://github.com/EvanLeung08/sftp-session-pool
 # 背景
 
-在现代的数据驱动环境中，安全文件传输协议（SFTP）扮演着至关重要的角色，它提供了一种安全、可靠的文件传输方式。我们目前项目是一个大型数据集成平台，跟上下游有很多文件对接是通过SFTP协议，当需要处理大量文件或进行大规模数据迁移时，我们常常会遇到因上下游服务器的限制导致连接访问被中断或者文件传输中断，大大影响系统的文件传输效率。常见的报错例 ``com.jcraft.jsch.JSchException: Session.connect: java.net.SocketException: Connection reset``、``com.jcraft.jsch.JSchException: connection is closed by foreign host``、``com.jcraft.jsch.JSchException: session is down``、``com.jcraft.jsch.JSchException: channel is not opened`` 等。这些连接问题也一直困扰着我们，那我们有没有办法在上下游有限的资源去最大提高文件并行处理能力呢？目前网上的线程池方案只是简单解决了``SSH Session``复用，但是并没有解决同一个``SSH Session``对象中的``SFTP Channel``复用问题，所以当文件量大的时候，还是会因为服务器的``SSH Session``数量限制从而影响文件并行传输效率。最节省资源又能提高文件并行处理方式的做法应该是同时复用``SSH Session``以及其``SFTP Channel``，这样最大并行可以处理的文件数就是 ``SSH Session数*SFTP Channel数``，而不是直接每个文件处理线程开启一个``SSH Session``，只复用``SSH Session``。
+在现代的数据驱动环境中，安全文件传输协议（SFTP）扮演着至关重要的角色，它提供了一种安全、可靠的文件传输方式。我们目前项目是一个大型数据集成平台，跟上下游有很多文件对接是通过SFTP协议，当需要处理大量文件或进行大规模数据迁移时，我们常常会遇到因上下游服务器的限制导致连接访问被中断或者文件传输中断，大大影响系统的文件传输效率。常见的报错例 ``com.jcraft.jsch.JSchException: Session.connect: java.net.SocketException: Connection reset``、``com.jcraft.jsch.JSchException: connection is closed by foreign host``、``com.jcraft.jsch.JSchException: session is down``、``com.jcraft.jsch.JSchException: channel is not opened`` 等。这些连接问题也一直困扰着我们，那我们有没有办法在上下游有限的资源去最大提高文件并行处理能力呢？目前网上的连接池方案只是简单解决了``SSH Session``复用，但是并没有解决同一个``SSH Session``对象中的``SFTP Channel``复用问题，所以当文件量大的时候，还是会因为服务器的``SSH Session``数量限制从而影响文件并行传输效率。最节省资源又能提高文件并行处理方式的做法应该是同时复用``SSH Session``以及其``SFTP Channel``，这样最大并行可以处理的文件数就是 ``SSH Session数*SFTP Channel数``，而不是直接每个文件处理线程开启一个``SSH Session``，只复用``SSH Session``。
 
 # 问题原因
 所有上下游的SFTP服务器都是连接限制，一般来说默认情况下，常见的Linux服务器默认``MaxSessions``是``10``，``MaxStartups``是``10:30:60``。
@@ -650,7 +650,7 @@ https://github.com/EvanLeung08/sftp-session-pool
 
 # 解决方案
 
-基于前文提到的思路，我们已经有了可配置连接池的雏形，抽象出来的线程池模型需要符合如下条件:
+基于前文提到的思路，我们已经有了可配置连接池的雏形，抽象出来的连接池模型需要符合如下条件:
 1.	为每台对接的SFTP服务器同一时间不能分配超过``X``个``SSH Session``
 2.	为每台对接的SFTP服务器分配的每个``SSH Session``最多只能建立``Y``个``SFTP Channel``
 3. 为每台对接的SFTP服务器分配的``SSH Session``连接池是隔离的，不会互相竞争
@@ -659,13 +659,13 @@ https://github.com/EvanLeung08/sftp-session-pool
 
 为了避免连接池浪费``SSH Session``资源，我们还需要做进一步优化，就是要限制每个``SSH Session``需要创建满``Y``个``SFTP Channel``才创建一个新的``SSH Session``，而不是每次请求都先创建一个新的``SSH Session``，这样会导致每个``SSH Session``都没被充分利用，而且也会增加系统的负担。
 
-**优化后的线程池模型如下：**
+**优化后的连接池模型如下：**
 1.	为每台对接的SFTP服务器同一时间不能分配超过``X``个``SSH Session``
 2.	为每台对接的SFTP服务器分配的每个SSH Session最多只能建立``Y``个``SFTP Channel``
 3. 为每台对接的SFTP服务器分配的``SSH Session``连接池是隔离的，不会互相竞争
 4. 多个线程请求获取对某台SFTP服务器``SSH Session``时，如果当前``SSH Session``池中的第一个Session的``SFTP Channel`` 数还没超过``Y``，则会返回同一个``SSH Session``实例，假如当前的``SSH Session``池的第一个``Session``创建的``SFTP Channel``数已经超过配置的``Y``值，则创建第二个``SSH Session``，如此类推，直到创建第N个``SSH Session``，N <``X``
 
-对于每个上游分配的线程池请求流程如下:
+对于每个上游分配的连接池请求流程如下:
 ![AI生产那个的流程图](https://img-blog.csdnimg.cn/direct/179340b78a8d44e7a0a91d341488fd68.png)
 
 # 代码实现
@@ -1068,7 +1068,7 @@ INSERT INTO SFTP_CONFIG (HOST, PORT, USERNAME, PASSWORD, MAXSESSIONS, MAXCHANNEL
 2024-03-09 01:24:07.185  INFO 58516 --- [      Thread-10] pool.demo.SftpFileProcessThread          : Thread 42 closed session com.jcraft.jsch.Session@17e2aaef. Session detail: 192.168.50.58:parallels
 
 ```
-从以上日志可以看出，**10**条线程虽然都并行持有相同的SFTP连接信息请求连接池，但是只会获取到**2**个``SFTP Session``实例而不是**10**个``SFTP Session``，并且当连接池里的``SSH Session``持有的``Channel``还没有达到配置的上限**5**个时，只会分配同一个``SSH Session``实例，当前连接池里的``SSH Session``对象持有的``Channel``超过**5**才会分配下一个``SFTP Session``对象，来确保``SFTP Session``不会浪费。因此目前线程池是符合我们预期想要的效果。
+从以上日志可以看出，**10**条线程虽然都并行持有相同的SFTP连接信息请求连接池，但是只会获取到**2**个``SFTP Session``实例而不是**10**个``SFTP Session``，并且当连接池里的``SSH Session``持有的``Channel``还没有达到配置的上限**5**个时，只会分配同一个``SSH Session``实例，当前连接池里的``SSH Session``对象持有的``Channel``超过**5**才会分配下一个``SFTP Session``对象，来确保``SFTP Session``不会浪费。因此目前连接池是符合我们预期想要的效果。
  
  ## 2.测试连接池配置上限超过服务器``Channel``限制的异常情况
  
