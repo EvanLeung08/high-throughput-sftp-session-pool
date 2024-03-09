@@ -36,8 +36,8 @@ public class SftpFileProcessThread extends Thread {
             int retries = 0;
             while (true) {
                 try {/**/
-                    session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, "");
-                    //session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, host + ":" + username); //get session with lock
+                    //session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, "");
+                    session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, host + ":" + username); //get session with lock
                     break; // if getSession() is successful, break the loop
                 } catch (NoAvailableSessionException e) {
                     if (++retries > this.maxRetries) {
@@ -66,7 +66,7 @@ public class SftpFileProcessThread extends Thread {
                 channelSftp.disconnect();
             }
             if (session != null) {
-                pool.closeSession(session);
+                pool.returnOrCloseSession(session);
                 log.info("Thread {} closed session {}. Session detail: {}", this.getId(), session, this.host + ":" + this.username);
             }
         }

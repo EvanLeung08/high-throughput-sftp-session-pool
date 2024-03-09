@@ -64,23 +64,6 @@ public class SftpSessionPool {
 
     }
 
-    /**
-     * get session without lock
-     *
-     * @param host
-     * @param port
-     * @param username
-     * @param password
-     * @param timeout
-     * @param unit
-     * @return
-     * @throws JSchException
-     * @throws InterruptedException
-     */
-    public Session getSession(String host, int port, String username, String password, long timeout, TimeUnit unit) throws JSchException, InterruptedException {
-        String sessionKey = host + ":" + port + ":" + username;
-        return getSessionFromPool(host, port, username, password, timeout, unit, sessionKey);
-    }
 
     private Session getSessionFromPool(String host, int port, String username, String password, long timeout, TimeUnit unit, String sessionKey) throws JSchException, InterruptedException {
         ConcurrentLinkedQueue<Session> hostSessions = sessions.computeIfAbsent(sessionKey, k -> new ConcurrentLinkedQueue<>());
@@ -151,7 +134,11 @@ public class SftpSessionPool {
     }
 
 
-    public synchronized void closeSession(Session session) {
+    /**
+     * Return the session if current session is till used by another thread ,otherwise close it.
+     * @param session
+     */
+    public synchronized void returnOrCloseSession(Session session) {
         Semaphore channelSemaphore = channelCounts.get(session);
         if (channelSemaphore != null) {
             channelSemaphore.release();
