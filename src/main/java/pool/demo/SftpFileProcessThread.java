@@ -1,9 +1,7 @@
 package pool.demo;
 
 import com.jcraft.jsch.ChannelSftp;
-import com.jcraft.jsch.JSchException;
 import com.jcraft.jsch.Session;
-import com.jcraft.jsch.SftpException;
 import lombok.extern.slf4j.Slf4j;
 import pool.common.utils.SftpSessionPool;
 import pool.exceptions.NoAvailableSessionException;
@@ -37,9 +35,9 @@ public class SftpFileProcessThread extends Thread {
         try {
             int retries = 0;
             while (true) {
-                try {
-                    // session = pool.getSession(host, username, password, 10, TimeUnit.SECONDS);
-                    session = pool.getSessionWithKeyLock(host, port, username, password, 10, TimeUnit.SECONDS, host + ":" + username); //get session with lock
+                try {/**/
+                    session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, "");
+                    //session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, host + ":" + username); //get session with lock
                     break; // if getSession() is successful, break the loop
                 } catch (NoAvailableSessionException e) {
                     if (++retries > this.maxRetries) {
@@ -65,11 +63,11 @@ public class SftpFileProcessThread extends Thread {
             log.error("Thread {} failed to process", this.getId(), e);
         } finally {
             if (channelSftp != null) {
-                //  channelSftp.disconnect();
+                channelSftp.disconnect();
             }
             if (session != null) {
-                //  pool.closeSession(session);
-                //  log.info("Thread {} closed session {}. Session detail: {}", this.getId(), session, this.host + ":" + this.username);
+                pool.closeSession(session);
+                log.info("Thread {} closed session {}. Session detail: {}", this.getId(), session, this.host + ":" + this.username);
             }
         }
     }

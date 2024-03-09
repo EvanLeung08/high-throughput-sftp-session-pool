@@ -3,14 +3,12 @@ package pool.services;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import pool.common.utils.SftpConnectionBuilder;
-import pool.dataobject.SftpConfig;
-import pool.repositories.SftpConfigRepository;
-import pool.demo.SftpFileProcessThread;
 import pool.common.utils.SftpSessionPool;
+import pool.dataobject.SftpConfig;
+import pool.demo.SftpFileProcessThread;
+import pool.repositories.SftpConfigRepository;
 
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @Service
@@ -27,7 +25,7 @@ public class SftpService {
         // Load all SFTP configs from the database
         List<SftpConfig> configs = sftpConfigRepository.findAll();
         //Indicate how many files need to be processed in the same time
-        int max_concurrent_opening_files = 5;
+        int max_concurrent_opening_files = 3;
 
         String testPath = "/";
         // Initialize a connection pool for each config

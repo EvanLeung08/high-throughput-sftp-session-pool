@@ -29,7 +29,21 @@ public class SftpSessionPool {
         this.maxSessionsPerHostSemaphore = new Semaphore(maxSessionsPerHost, true);
     }
 
-    public Session getSessionWithKeyLock(String host, int port, String username, String password, long timeout, TimeUnit unit, String lockKey) throws JSchException, InterruptedException {
+    /**
+     * get session with keyLock
+     *
+     * @param host
+     * @param port
+     * @param username
+     * @param password
+     * @param timeout
+     * @param unit
+     * @param lockKey
+     * @return
+     * @throws JSchException
+     * @throws InterruptedException
+     */
+    public Session getSession(String host, int port, String username, String password, long timeout, TimeUnit unit, String lockKey) throws JSchException, InterruptedException {
         String sessionKey = host + ":" + port + ":" + username;
         if (StringUtils.hasLength(lockKey)) {
             // waiting for the available lock
@@ -50,6 +64,19 @@ public class SftpSessionPool {
 
     }
 
+    /**
+     * get session without lock
+     *
+     * @param host
+     * @param port
+     * @param username
+     * @param password
+     * @param timeout
+     * @param unit
+     * @return
+     * @throws JSchException
+     * @throws InterruptedException
+     */
     public Session getSession(String host, int port, String username, String password, long timeout, TimeUnit unit) throws JSchException, InterruptedException {
         String sessionKey = host + ":" + port + ":" + username;
         return getSessionFromPool(host, port, username, password, timeout, unit, sessionKey);
