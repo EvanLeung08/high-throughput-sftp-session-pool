@@ -542,7 +542,7 @@ parallels@ubuntu-linux-22-04-desktop:~$
 INSERT INTO SFTP_CONFIG (HOST, PORT, USERNAME, PASSWORD, MAXSESSIONS, MAXCHANNELS) VALUES
 ('192.168.50.57', 22,'parallels', 'test8808', 3, 1);
 ```
-3.3 修改``SftpFileProcessThread``代码中获取连接方式改成无锁方式，这样可以看到并发创建``Session``数量超过服务器限制时服务器的报错。因为``MaxStartups``上面我们配置了``2``，需要同时多个线程模拟并发创建超过2个等待验证的``Session``才能看到效果，如果使用有锁模式，创建``Session``就会变成串行，验证通过才会到下一个``Session``，服务器就不会有多个等待的验证的``Session``。
+3.3 修改``SftpFileProcessThread``代码中获取连接方式改成无锁方式，这样可以看到并发创建``Session``数量超过服务器限制时服务器的报错。因为``MaxStartups``上面我们配置了``2``，需要同时多个线程模拟并发创建超过2个等待验证的``Session``才能看到效果，如果使用有锁模式，创建``Session``就会变成串行，验证通过才会到下一个``Session``，服务器就不会同时有多个等待的验证的``Session``。
 ```java
  session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, "");
  //session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, host + ":" + username); //get session with lock
