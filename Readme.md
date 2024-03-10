@@ -1,114 +1,117 @@
-# 背景
+# Background
 
-在现代的数据驱动环境中，安全文件传输协议（SFTP）扮演着至关重要的角色，它提供了一种安全、可靠的文件传输方式。我们目前项目是一个大型数据集成平台，跟上下游有很多文件对接是通过SFTP协议，当需要处理大量文件或进行大规模数据迁移时，我们常常会遇到因上下游服务器的限制导致连接访问被中断或者文件传输中断，大大影响系统的文件传输效率。常见的报错例子 ``com.jcraft.jsch.JSchException: Session.connect: java.net.SocketException: Connection reset``、``com.jcraft.jsch.JSchException: connection is closed by foreign host``、``com.jcraft.jsch.JSchException: session is down``、``com.jcraft.jsch.JSchException: channel is not opened`` 等。这些连接问题也一直困扰着我们，那我们有没有办法在上下游有限的资源去最大提高文件并行处理能力呢？目前网上的连接池方案只是简单解决了``SSH Session``复用，但是并没有充分利用同一个``SSH Session``对象中的``SFTP Channel``以减少``Session的``开销，所以当文件量大的时候，还是会因为服务器的``SSH Session``数量限制从而影响文件并行传输效率。最节省资源又能提高文件并行处理方式的做法应该是同时复用``SSH Session``以及其``SFTP Channel``，这样最大并行可以处理的文件数就是 ``SSH Session数*SFTP Channel数``，而不是直接每个文件处理线程开启一个``SSH Session``，只使用``SSH Session``的一个``Channel``。
+In the modern data-driven environment, the Secure File Transfer Protocol (SFTP) plays a crucial role by providing a secure and reliable file transfer method. Our current project is a large-scale data integration platform, where many file interfaces are connected via the SFTP protocol. When dealing with large volumes of files or large-scale data migration, we often encounter connection access interruptions or file transfer interruptions due to limitations on the upstream and downstream servers, significantly affecting the system's file transfer efficiency. Common error examples include ``com.jcraft.jsch.JSchException: Session.connect: java.net.SocketException: Connection reset, com.jcraft.jsch.JSchException: connection is closed by foreign host, com.jcraft.jsch.JSchException: session is down, com.jcraft.jsch.JSchException: channel is not opened``, etc. These connection issues have also been a long-standing concern for us. So, is there a way to maximize file parallel processing capabilities with limited resources on the upstream and downstream servers? The current connection pool solutions on the internet only solve the reuse of ``SSH Session`` but do not fully utilize the ``SFTP Channel`` within the same ``SSH Session`` to reduce the overhead of ``Session``, so when the file volume is large, the efficiency of file parallel transmission is still affected by the server's ``SSH Session`` quantity limit. The most resource-saving and effective method to increase file parallel processing capabilities is to reuse both ``SSH Session`` and its ``SFTP Channel``. This way, the maximum number of files that can be processed in parallel is the product of ``SSH Session count *SFTP Channel count``, rather than each file processing thread opening a ``SSH Session`` and using only one ``Channel`` of ``SSH Session``.
 
-# 问题原因
-所有上下游的SFTP服务器都是连接限制，一般来说默认情况下，常见的Linux服务器默认``MaxSessions``是``10``，``MaxStartups``是``10:30:60``。
+# Problem Cause
+All upstream and downstream SFTP servers have connection limits. Generally, the default ``MaxSessions`` for common Linux servers is ``10``, and ``MaxStartups`` is ``10:30:60``.
 
-这里简单对``MaxSessions``和``MaxStartups``两个配置参数解释下，这个对我们理解SFTP很重要。
-- ``MaxStartups 10:30:60``:这里指服务器开始时可以进行的最大未经身份验证的连接数是**10**，当超过第一个数字的连接数时(**10**)，``SSHD`` 将开始随机地拒绝新的连接，在达到第三个数字时(**60**)，``SSHD`` 将拒绝所有新的连接。注意，这里是拒绝未经身份认证的连接数，已经登陆的不会限制，也就是``客户端如果同时创建一堆连接等待认证的话，等待的数量超过这个配置就会被拒绝``。
-- ``MaxSessions 10``: 这里是指每个``SSH``连接可以创建多少个通信通道，例如JSCH中的``ChannelSftp``文件处理通道。
+Here's a brief explanation of the two configuration parameters ``MaxStartups`` and ``MaxSessions``, which is important for understanding SFTP:
+- ``MaxStartups 10:30:60``: This indicates that the maximum number of unauthenticated connections the server can handle at startup is 10. Once the number of connections exceeds the first number (**10**), ``SSHD`` will start to randomly reject new connections. When the number of connections reaches the third number (**60**), ``SSHD`` will reject all new connections. Note that this is for unauthenticated connections; already logged-in connections are not limited. In other words, if the client creates multiple connections waiting for authentication, the number exceeding this configuration will be rejected.
+- ``MaxSessions 10``: This specifies the maximum number of communication channels that can be created per ``SSH`` connection, such as the ``ChannelSftp`` file processing channel in ``JSCH``.
 
-如果上下游不对其SFTP服务器做任何设置，那么其服务器最大允许同时并行**10**个SSH连接(超过**10**个连接服务器``SSHD``服务就会随机中断连接，服务开始不稳定)，每个``SSH``连接最多可以打开**10**个``SFTP Channel``。 
+If the upstream and downstream do not set their SFTP servers, the server will allow a maximum of **10** simultaneous ``SSH`` connections (exceeding **10** connections will cause the ``SSHD`` service on the server to randomly interrupt connections, leading to unstable service start). Each ``SSH`` connection can open up to **10** ``SFTP Channels``.
 
-**这里要说下``MaxSessions``和``MaxStartups``参数对Java SFTP客户端的影响**
+> The MaxSessions and MaxStartups parameters in the SSH daemon (SSHD) configuration significantly impact Java SFTP clients, especially when using the JSch library. Here's how these parameters affect the Java SFTP client:
+> - ``MaxStartups``: This parameter controls the maximum number of concurrent unauthenticated connections to the SSH daemon. It's crucial for preventing brute-force attacks by limiting the number of connections attempting authentication simultaneously. For ``JSch`` clients, this means that if you attempt to concurrently create multiple Session objects (representing multiple ``SSH`` connections), the server might start rejecting additional connections once the limit is reached. This setting is particularly relevant when dealing with high concurrency scenarios, such as when a large number of SFTP transfers are initiated simultaneously.
+> - ``MaxSessions``: This parameter specifies the maximum number of open sessions (e.g., shell, login, or subsystem sessions like SFTP) permitted per network connection. It affects how many ``ChannelSftp`` objects (or other types of channels) can be created within a ``single Session`` object in ``JSch``. If you try to create more channels than the ``MaxSessions`` limit allows, the server might reject new channel creation requests. This setting is essential for managing the number of parallel SFTP operations that can be performed over a single ``SSH`` connection.
 
-> 以下以目前常用的SFTP框架JSCH为例子。 MaxStartups 和 MaxSessions 是 SSH 守护进程（SSHD）的配置选项，而 JSch 中的 Session 和 ChannelSftp 是 Java 客户端连接到 SSH 服务的对象。它们之间的关系如下：
-> - ``MaxStartups``：这是 SSHD 配置的一部分，用于控制并发未经身份验证的连接的数量。这对于防止暴力破解攻击非常有用，因为它限制了同时尝试身份验证的连接数。这个设置对于 JSch 客户端来说，主要影响的是当你尝试并发创建多个 Session 对象（即多个 SSH 连接）时，服务器端可能会开始拒绝额外的连接。
-> - ``MaxSessions``：这也是 SSHD 配置的一部分，用于限制每个网络连接（即每个 SSH Session）可以打开的最大会话（channel）数量。这个设置对于 JSch 客户端来说，主要影响的是在一个 Session 对象上你可以创建多少个 ChannelSftp 对象（或其他类型的 Channel 对象）。如果你尝试超过 MaxSessions 的限制创建更多的 Channel，服务器端可能会拒绝新的 Channel 创建请求。
+In summary, both ``MaxStartups`` and ``MaxSessions`` are server-side limitations that affect how many Session and Channel objects a client (e.g., an application using ``JSch``) can concurrently create. When designing a system that needs to handle a large number of concurrent SFTP transfers, it's important to consider these limits and adjust the ``SSHD`` configuration on the server as necessary to accommodate the application's requirements.
 
-总的来说，``MaxStartups`` 和 ``MaxSessions`` 是服务器端的限制，它们影响了客户端（例如使用 JSch 的应用程序）可以并行创建多少个 ``Session`` 和 ``Channel``。如果我们要设计一个需要处理大量并发 SFTP 传输的系统，需要考虑这些限制，并在必要时调整服务器的 SSHD 配置。
+**As an example, let's use a real-world model to briefly describe the current scenario of downloading files on our data integration platform**
 
-**以文件下载为例，这里用现实中的模型简单说下目前我们数据集成平台下载文件的场景**
-我们数据集成平台需要从不同的上游的下载文件，``A、B、C``公司相当于我们的上游系统，某东快递相当于我们的数据集成系统。如下图所示，以其中一个快递公司的视角，某东快递需要对接多个商家收件，如果想提高收件速度，最理想就是安排不同的员工并行到不同的商家去取件，这样才可以同时最快收件；而以其中一个商家的视角，A公司要应对不同快递公司的并行取件请求，必然需要对人员有些限制，不然快递员太多可能会影响公司的正常运作，这也就是为什么SFTP服务器需要限制外部连接。
+Our data integration platform needs to download files from different upstream sources, with `"A, B, C"` companies serving as our upstream systems, and "Delivery Company" representing our data integration system. As shown in the diagram, from the perspective of one courier company, Delivery Company needs to pick up packages from multiple merchants. To increase the speed of receiving packages, the ideal solution would be to have different employees pick up packages from different merchants in parallel. This way, packages can be received simultaneously at the fastest possible speed. From the perspective of one merchant, A Company needs to deal with parallel pickup requests from different courier companies. This inevitably requires some limitations on personnel; otherwise, having too many couriers could disrupt the company's normal operations. This is why SFTP servers need to limit external connections.
 ![](https://img-blog.csdnimg.cn/direct/1dc368ab077e40cea26708141630fbe5.png)
->这里用现实生活中的场景来类比我们数据集成平台和上游系统进行文件下载交互的模型，方便大家理解SFTP服务器的限制，以及面对上游服务器的限制怎么最大化我们的传输效率。P.S：以下内容是以我们数据集成平台的视角去陈述。
+>Here, we use a scenario from real life to analogize the model of our data integration platform and upstream systems for file download interaction, to help everyone understand the limitations of the SFTP server, as well as how to maximize our transmission efficiency in the face of limitations from upstream servers. P.S.: The following content is stated from the perspective of our data integration platform.
 
-## 1对1模型(对接一个上游下载文件)
-因为我们目的是提升我们数据集成平台的并行文件传输效率，所以这里是以我们数据集成平台为参照物，假设只跟一个上游交互的场景。(这里为了简单化说明，假设上游服务器每个用户允许最大并发连接是1，打开最大会话数量是2)。
->``用例说明``: 某东快递类比我们的数据集成平台，我们平台要去上游收件，而A公司类比我们要对接的其中一个上游。A公司的门禁类比上游服务器的限制规则。某东快递的快递员类比数据集成平台需要创建的``SSH``连接，每个快递员可以同时搬运几个货物类比每个``SSH``连接打开的SFTP Channel数量。
+## 1:1 model (Connecting to one upstream to download files)
+Because our goal is to enhance the parallel file transfer efficiency of our data integration platform, we are using our data integration platform as a reference, assuming a scenario where we only interact with one upstream. (For simplicity, we assume that the upstream server allows a maximum of 1 concurrent connection per user and a maximum of 2 open sessions per user).
+>``Use Case Description``: Delivery Company is analogous to our data integration platform, and our platform needs to pick up packages from upstream. A Company is analogous to one of the upstreams we need to connect to. The gate at A Company is analogous to the limitations of the upstream server rules. The couriers at Delivery Company are analogous to the ``SSH connections`` that the data integration platform needs to create, and each courier can move several packages at the same time, analogous to the number of ``SFTP Channels`` that can be opened with each ``SSH connection``.
 
 ![](https://img-blog.csdnimg.cn/direct/06ee16e0d91146c5aea298739bfbf06d.png)
-场景: 
-某东快递需要上门到A公司取件，A公司有三个件在仓库，A公司有以下门禁要求，不满足就会被拒绝访问：
-1.同一个时间允许同一家物流公司的3个快递员进入
-2.每个工人不能取超过一个货物
 
-某东快递如果想取件时效性高，在快递员充足的情况下，最理想是派3个快递员同时取件，每人拿一个就可以一次拿完。但是由于A公司有门禁要求，3名快递员同时取取件，会有一位快递员会被保安拒绝，造成人员浪费。因此只需要同时派2名快递员，一个人拿2个，另一个人拿一个就可以。这样子就能一次拿完，也不会人员浪费，时效性也高。
+**Scenario:**
+Delivery Company needs to pick up packages at A Company, which has three packages in its warehouse. A Company has the following access restrictions, and access will be denied if not met:
+1. At the same time, only three couriers from the same logistics company are allowed to enter.
+2. Each worker cannot pick up more than one package.
 
-但是真实情况，在对接上游时，对方一般都不会告诉我们有什么限制，通常都是被对方拦截才知道，而且快递员也是有成本的。所以我们作为某东快递，如果一直派快递员去A公司取件，除了可能派出去的快递员会被拦截，还会造成人员浪费。因此我们需要一种灵活配置的方式，可以基于对接的上游，灵活分配符合需求的快递员，这样可以在符合上游限制范围内，最大化我们的取件效率。
+If Delivery Company wants to ensure high efficiency in picking up packages, under the condition of sufficient couriers, the ideal scenario would be to send three couriers simultaneously to pick up packages, with each person picking up one. However, due to A Company's access restrictions, three couriers attempting to pick up packages simultaneously will result in one courier being denied entry by security, leading to wasted personnel. Therefore, it is only necessary to send two couriers simultaneously, with one person picking up two packages and the other picking up one. This way, all packages can be picked up at once, without wasting personnel, and with high efficiency.
 
-**我们需要有一种可配置的池化技术，除了可以重复利用快递员，还需要在对方限制的范围基于以下原则合理分配:**
-1.	并行派出的快递员数<=对方限制同一时间允许相同公司进入的快递员数
-2.	每位快递员并行取件的数量<=对方限制每个快递员单次同时取件的数量
+However, in reality, when interfacing with upstream systems, the other party usually does not inform us of any restrictions. It is usually only when we are blocked by the other party that we become aware of them. Also, couriers do have costs. Therefore, as Delivery Company, if we continue to send couriers to A Company to pick up packages, not only might the couriers sent out be blocked, but it would also lead to wasted personnel. Therefore, we need a flexible configuration method that can allocate couriers flexibly based on the upstream system being interfaced with, ensuring that we maximize our pickup efficiency within the constraints imposed by the upstream system.
 
-**用上面的例子转化成计算机术语，就是需要我们数据集成平台满足以下条件:**
-1.	为A上游同一时间不能建立超过**2**个``SSH Session``
-2.	每个``SSH Session``最多只能建立一个``Sftp Channel``
+**We need a configurable pooling technology that not only allows for the reuse of couriers but also needs to allocate resources within the scope of the following principles based on the restrictions imposed by the other party:**
+1.	The number of couriers dispatched in parallel <= The number of couriers allowed by the other party to enter the same company at the same time.
+2.	The number of packages each courier can pick up in parallel <= The number of packages a single courier can pick up at a time according to the other party's restrictions.
 
-## 1对多模型(对接多个上游下载文件)
-1对多模型是1对1模型的延伸，因为我们目的是提升我们数据集成平台的并行文件传输效率，所以这里是以我们数据集成平台为参照物，假设只跟多个上游交互的场景。(这里为了简单化说明，假设上游服务器每个用户允许最大并发连接是1，打开最大会话数量是2)。
->``用例说明``: 跟以上1对1模型类似，某东快递类比我们的数据集成平台，我们平台要去多个上游收件，而A、B公司类比我们要对接的两个上游。A、B公司的门禁类比上游服务器的限制规则。某东快递的快递员类比数据集成平台需要创建的SSH连接，每个快递员可以同时搬运几个货物类比每个SSH连接打开的SFTP Channel数量。
+**Translated into computer terminology using the above example, our data integration platform needs to meet the following conditions:**
+1.	For A upstream, no more than ``2 SSH Sessions`` can be established at the same time.
+2.	Each ``SSH Session`` can only establish ``one SFTP Channel``.
+
+## 1:N model (Connecting to multiple upstreams to download files)
+The 1:N model is an extension of the 1:1 model, as our goal is to enhance the parallel file transfer efficiency of our data integration platform. Therefore, here we use our data integration platform as a reference, assuming a scenario where it interacts with multiple upstreams. (For simplicity, we assume that each upstream server allows a maximum of 1 concurrent connection per user and a maximum number of open sessions is 2).
+> ``Use Case Description``: Similar to the 1:1 model above, Delivery Company is analogous to our data integration platform, which needs to pick up packages from multiple upstreams. A and B companies are analogous to the two upstreams we need to connect to. The gatekeeping of A and B companies is analogous to the limitations of upstream servers. The couriers of Delivery Company are analogous to the ``SSH`` connections that need to be created on our data integration platform, and each courier can move several packages at the same time, analogous to the number of ``SFTP Channels`` opened by ``each SSH connection``.
 
 ![](https://img-blog.csdnimg.cn/direct/76d52df10c5f457cb691c956da533dab.png)
-场景: 
-某东快递需要上门到A、B公司取件，A、B公司各有三个件在仓库，A、B公司均有以下门禁要求，不满足就会被拒绝访问：
-1.同一个时间允许同一家物流公司的3个快递员进入
-2.每个工人不能取超过一个货物
+**Scenario**: 
 
-跟1对1模型类似，某东快递如果想取件时效性高，在快递员充足的情况下，最理想是同时为两家公司各派3名快递员到A、B公司取件，每人拿一个就可以一次拿完。但是由于A、B公司有门禁要求，3名快递员同时取取件，会有一位快递员会被保安拒绝，造成人员浪费。因此只需要同时各派2名快递员，一个人拿2个，另一个人拿一个就可以。这样子就能一次拿完，也不会人员浪费，时效性也高。
+Delivery Company needs to pick up packages from A and B companies. Each company has three packages in their warehouse. Both A and B companies have the following security requirements; if not met, access will be denied:
+1.Up to three couriers from the same logistics company can enter at the same time.
+2.Each worker cannot pick up more than one package.
 
-
-**因为这里是一对多模型，跟上面会有一点不一样的地方，我们除了需要上面提到的可配置的池化技术，还需要针对不同上下游做资源隔离，基本原则如下:**
-1.	并行派出的快递员数<=对方限制同一时间允许相同公司进入的快递员数
-2.	每位快递员并行取件的数量<=对方限制每个快递员单次同时取件的数量
-3.	同一时间为每个公司分配的快递员是独立的，不会资源竞争
-
-**用上面的例子转化成计算机术语，就是需要我们数据集成平台:**
-1.	为A、B上游同一时间不能超过**2**个``SSH Session``
-2.	每个``SSH Session``最多只能建立一个``Sftp Channel``
-3. A、B的``SSH Session``连接池是隔离的，不会互相竞争
+Similar to the 1:1 model, if Delivery Company wants to ensure high efficiency in picking up packages, under the condition that there are enough couriers, the ideal scenario is to simultaneously send three couriers from each company to A and B to pick up packages. Each courier can pick up one package, ensuring all packages are picked up in one go. However, due to the security requirements of A and B companies, if three couriers try to pick up packages at the same time, one courier will be denied access by security, resulting in wasted personnel. Therefore, it is necessary to send two couriers from each company, one picking up two packages and the other picking up one. This way, all packages can be picked up in one go without wasting personnel, and efficiency is also high.
 
 
-# 解决方案
+**Because this is a one-to-many model, there will be a slight difference from what was mentioned above. In addition to the configurable pooling technology mentioned above, we also need to isolate resources for different upstream and downstream, with the basic principles as follows:**
+1.	The number of couriers dispatched in parallel <= The number of couriers allowed by the other party to enter the same company at the same time.
+2.	The number of packages each courier picks up in parallel <= The number of packages a courier can pick up at the same time according to the other party's limit.
+3.	The couriers allocated to each company at the same time are independent and will not compete for resources.
 
-基于前文提到的思路，我们已经有了可配置连接池的雏形，抽象出来的连接池模型需要符合如下条件:
-1.	为每台对接的SFTP服务器同一时间不能分配超过``X``个``SSH Session``
-2.	为每台对接的SFTP服务器分配的每个``SSH Session``最多只能建立``Y``个``SFTP Channel``
-3. 为每台对接的SFTP服务器分配的``SSH Session``连接池是隔离的，不会互相竞争
+**Translated into computer terminology using the above example, our data integration platform needs to:**
+1.	Not exceed ``2 SSH Sessions`` for A and B at the same time.
+2.	Each ``SSH Session`` can only establish ``one Sftp Channel``.
+3. The connection pools for A and B's ``SSH Sessions`` are isolated and will not compete with each other.
 
-以上``X``代表的我们需要配置的最大``SSH Session``连接数，``Y``代表我们需要配置的每个``SSH Session``最大能创建的``Channel``数，这两个值都需要根据对接的SFTP服务器的限制和自身服务器情况去调整。
 
-为了避免连接池浪费``SSH Session``资源，我们还需要做进一步优化，就是要限制每个``SSH Session``需要创建满``Y``个``SFTP Channel``才创建一个新的``SSH Session``，而不是每次请求都先创建一个新的``SSH Session``，这样会导致每个``SSH Session``都没被充分利用，而且也会增加系统的负担。
+# Solutions
 
-**优化后的连接池模型如下：**
-1.	为每台对接的SFTP服务器同一时间不能分配超过``X``个``SSH Session``
-2.	为每台对接的SFTP服务器分配的每个SSH Session最多只能建立``Y``个``SFTP Channel``
-3. 为每台对接的SFTP服务器分配的``SSH Session``连接池是隔离的，不会互相竞争
-4. 多个线程请求获取对某台SFTP服务器``SSH Session``时，如果当前``SSH Session``池中的第一个Session的``SFTP Channel`` 数还没超过``Y``，则会返回同一个``SSH Session``实例，假如当前的``SSH Session``池的第一个``Session``创建的``SFTP Channel``数已经超过配置的``Y``值，则创建第二个``SSH Session``，如此类推，直到创建第N个``SSH Session``，N <=``X``
+Based on the ideas mentioned earlier, we already have a preliminary form of a configurable connection pool. The abstracted connection pool model needs to meet the following conditions:
 
-对于每个上游分配的连接池请求流程如下:
+1.	For each connected SFTP server, no more than ``X SSH Sessions`` can be allocated at the same time.
+2.	For each ``SSH Session`` allocated to each connected SFTP server, a maximum of ``Y SFTP Channels`` can be established.
+3. The ``SSH Session`` connection pool for each connected SFTP server is isolated and will not compete with each other.
+
+
+In the above, ``X`` represents the ``maximum number of SSH Session connections`` we need to configure, and ``Y`` represents the ``maximum number of Channels`` that can be created for ``each SSH Session``. Both of these values need to be adjusted based on the limitations of the SFTP servers we are connecting to and our own server situation.
+
+To avoid wasting ``SSH Session`` resources in the connection pool, we also need to further optimize by limiting the creation of a new SSH Session to only when each SSH Session needs to create ``Y`` ``SFTP Channels``, rather than creating a new ``SSH Session`` for every request. This will ensure that ``each SSH Session`` is fully utilized and will also reduce the system's load.
+
+**The optimized connection pool model is as follows:**
+1.	For each connected SFTP server, no more than ``X`` ``SSH Sessions`` can be allocated at the same time.
+2.	Each SSH Session allocated for each connected SFTP server can establish a maximum of ``Y`` ``SFTP Channels``.
+3. The ``SSH Session`` connection pool for each connected SFTP server is isolated and will not compete with each other.
+4. When multiple threads request to obtain an ``SSH Session`` for a particular SFTP server, if the ``SFTP Channel count`` of the ``first SSH Session`` in the ``current SSH Session pool`` has not exceeded ``Y``, the ``same SSH Session`` instance will be returned. If the ``SFTP Channel count`` of the ``first SSH Session`` in the ``current SSH Session pool`` has already exceeded the configured ``Y`` value, ``a second SSH Session`` will be created, and so on, until the ``Nth SSH Session`` is created, where ``N <= X``.
+
+The process for each upstream connection pool request is as follows:
 ![AI生产那个的流程图](https://img-blog.csdnimg.cn/direct/179340b78a8d44e7a0a91d341488fd68.png)
 
-# 代码实现
+# Code implementation
 ## SFTP Session Pool
-这是一个 SFTP 会话池的实现，它使用了 JSch 库来创建和管理 SFTP 会话（``Session``）和通道（``ChannelSftp``）。这个会话池的主要目的是复用已经创建的 SFTP 会话和通道，以提高文件传输的效率。
+This is an implementation of an ··SFTP session pool··, which uses the JSch library to create and manage SFTP sessions (``Session``) and channels (``ChannelSftp``). The main purpose of this session pool is to reuse already created SFTP sessions and channels to improve the efficiency of file transfers.
 
-以下是这个类的主要功能和设计考虑：
+**The following are the main functionalities and design considerations of this class:**
 
-- **会话和通道的创建和管理：** 这个类使用 ``getSession`` 方法来从池中获取一个会话，如果没有可用的会话，它会创建一个新的会话。然后，它使用 ``getChannel ``方法来从一个会话中打开一个新的 SFTP 通道。
+- **Session and Channel Creation and Management:** This class uses the getSession method to obtain a session from the pool. If no session is available, it creates a new one. Then, it uses the ``getChannel`` method to open a new ``SFTP channel`` from a session.
 
-- **并发控制：** 这个类使用了 ``Semaphore ``对象来限制每个主机的最大会话数（``maxSessionsPerHostSemaphore``）以及每个会话的最大通道数（``channelCounts``）。这样可以防止过多的并发连接导致系统资源耗尽。
+- **Concurrency Control:** This class uses a ``Semaphore`` object to limit the maximum number of sessions per host (``maxSessionsPerHostSemaphore``) and the maximum number of channels per session (``channelCounts``). This prevents excessive concurrent connections from exhausting system resources.
 
-- **异常处理：** 如果在创建会话或打开通道时发生异常，这个类会从池中移除无效的会话，并释放相应的 ``Semaphore ``许可。这样可以确保池中只包含有效的会话和通道。
+- **Exception Handling:** If an exception occurs while creating a session or opening a channel, this class removes the invalid session from the pool and releases the corresponding ``Semaphore permit``. This ensures that the pool only contains ``valid sessions and channels``.
 
-- **会话和通道的复用：** 如果一个会话的所有通道都已经关闭，这个类会关闭这个会话并从池中移除它。否则，它会将这个会话放回池中，以便后续的请求可以复用它。
+- **Session and Channel Reuse:** If all channels of a session have been closed, this class closes the session and removes it from the pool. Otherwise, it returns the session to the pool for reuse in subsequent requests.
 
-- **Key锁：** 这是用来防止多个持有相同的(``host+port+username``)的线程取Session的时候会出现并发，导致创建的``Session``数比预期多。
+- **Key Lock:** This is used to prevent multiple threads holding the same (``host+port+username``) from creating multiple Sessions when obtaining a Session, which would result in more Sessions being created than expected.
 
-- **会话释放** - 如果当前``Session``仍有``Channel``在使用(意味着其他线程在使用该``Session``)，则会放回连接池。否则，会关闭。
+- **Session Release:**  If the current Session still has Channels in use (indicating that other threads are using that Session), it is returned to the connection pool. Otherwise, it is closed.
 
-这个类的设计提供了一个有效的方式来管理 SFTP 会话和通道，使得它们可以被多个请求复用，从而提高文件传输的效率。
+The design of this class provides an effective way to manage SFTP sessions and channels, allowing them to be reused by multiple requests, thereby improving the efficiency of file transfers.
 ```java
 package pool.common.utils;
 
@@ -272,7 +275,7 @@ public class SftpSessionPool {
 ```
 
 ## SftpConnectionPoolFactory
-为了对接不同的上游，要实现连接池隔离，这里创建一个工厂类给调用者，通过不同的Key(``host+port+username)``可以复用独立的连接池，这里是因为考虑到有些SFTP Server是多个用户复用的，不同的用户文件传输需求应该是可以并行处理，因此这里连接池要资源隔离。
+To connect to different upstreams, we need to implement connection pool isolation. Here, we create a factory class for the caller, which allows for the reuse of independent connection pools through different keys (``host+port+username``). This is because some SFTP servers are shared among multiple users, and the file transfer requirements of different users should be able to be processed in parallel. Therefore, here, the connection pool needs to be resource isolated.
 
 ```java
 package pool.common.utils;
@@ -308,7 +311,8 @@ public class SftpConnectionPoolFactory {
 ```
 
 ## SftpFileProcessThread
-这里创建一个文件处理线程来模拟文件处理，这里获取``Session``对象时使用``host + ":" + username``作为锁是防止获取``Session``时并发导致创建的连接数超过预期。
+Here, we create a file processing thread to simulate file processing. When obtaining the ``Session`` object, we use ``host + ":" + username`` as a lock to prevent concurrent creation of connections from exceeding expectations.
+
 ```java
 package pool.demo;
 
@@ -387,7 +391,8 @@ public class SftpFileProcessThread extends Thread {
 
 ```
 ## SftpService
-这里是程序入口，从数据库配置获取连接池配置信息，然后默认开启了``10``条线程去模拟请求连接池并处理文件任务，后面我们进行测试时，需要改这个线程数来演示。
+Here is the program entry, where we obtain the connection pool configuration information from the database configuration. Then, by default, we start ``10`` threads to simulate requesting the connection pool and processing file tasks. Later, when we perform testing, we need to change this number of threads to demonstrate.
+
 ```java
 package pool.services;
 
@@ -434,8 +439,9 @@ public class SftpService {
 }
 ```
 
-## SFTP_CONFIG表
-这里我创建了一张配置表，用来配置连接池的上限参数，这里JSCH的 ``MaxSession``对应的是服务器``MaxStartups``参数，JSCH的``MaxChannel``对应的是服务器的``MaxSessions``参数
+## SFTP_CONFIG Table
+Here, I created a configuration table to set the upper limit parameters for the connection pool. In this context, JSCH's ``MaxSession`` corresponds to the server's ``MaxStartups`` parameter, and JSCH's ``MaxChannel`` corresponds to the server's ``MaxSessions`` parameter.
+
 ```sql
 CREATE TABLE SFTP_CONFIG (
     ID INT AUTO_INCREMENT PRIMARY KEY,
@@ -449,9 +455,9 @@ CREATE TABLE SFTP_CONFIG (
 
 ```
 
-# 测试连接池
-## 1.不超过服务器限制
-1.1 这里我把SFTP服务器的``MaxStartups``设置成``2``，``MaxSession``设置成``5``。这里把SFTP 的限制设低点是方便测试。
+# Test connection pool
+## 1.Not exceeding server limits.
+1.1 Here, I set the ``MaxStartups`` for the SFTP server to ``2`` and ``MaxSession`` to ``5``. Setting the limits of SFTP server lower here is for easier testing.
 ```shell
 parallels@ubuntu-linux-22-04-desktop:~$ grep -i "MaxStartups" /etc/ssh/sshd_config
 MaxStartups 2
@@ -459,12 +465,13 @@ parallels@ubuntu-linux-22-04-desktop:~$ grep -i "MaxSessions" /etc/ssh/sshd_conf
 MaxSessions 5
 parallels@ubuntu-linux-22-04-desktop:~$ 
 ```
-1.2 把连接池的数据库配置改成``MaxSession=3，MaxChannel =5`` 与上面服务器配置一致。
+1.2 Change the database configuration of the connection pool to ``MaxSession=3, MaxChannel=5`` to match the server configuration above.
 ```sql
 INSERT INTO SFTP_CONFIG (HOST, PORT, USERNAME, PASSWORD, MAXSESSIONS, MAXCHANNELS) VALUES
 ('192.168.50.58', 22,'parallels', 'test8808', 2, 5);
 ```
-1.3 接下来我们来启动程序，会同时并行开启**10**个线程持有相同的连接信息去访问同一台SFTP 服务器，我们看看程序是否会符合我们预期，**10**个线程应该只会打开**2**个``SFTP Session``，并且连接服务器不会报错。
+1.3 Next, we will start the program, which will simultaneously open ``10`` threads with the same connection information to access the same SFTP server. We will see if the program meets our expectations. ``10`` threads should only open ``2 SFTP Sessions``, and the connection to the server should not report an error.
+
 ```shell
 2024-03-09 01:22:03.536  INFO 58516 --- [       Thread-3] pool.demo.SftpFileProcessThread          : Thread 35 got session com.jcraft.jsch.Session@5cae46b5. Session detail: 192.168.50.58:parallels
 2024-03-09 01:22:04.072  INFO 58516 --- [       Thread-4] pool.demo.SftpFileProcessThread          : Thread 36 got session com.jcraft.jsch.Session@5cae46b5. Session detail: 192.168.50.58:parallels
@@ -488,11 +495,11 @@ INSERT INTO SFTP_CONFIG (HOST, PORT, USERNAME, PASSWORD, MAXSESSIONS, MAXCHANNEL
 2024-03-09 01:24:07.185  INFO 58516 --- [      Thread-10] pool.demo.SftpFileProcessThread          : Thread 42 closed session com.jcraft.jsch.Session@17e2aaef. Session detail: 192.168.50.58:parallels
 
 ```
-从以上日志可以看出，**10**条线程虽然都并行持有相同的SFTP连接信息请求连接池，但是只会获取到**2**个``SFTP Session``实例而不是**10**个``SFTP Session``，并且当连接池里的``SSH Session``持有的``Channel``还没有达到配置的上限**5**个时，只会分配同一个``SSH Session``实例，当前连接池里的``SSH Session``对象持有的``Channel``超过**5**才会分配下一个``SFTP Session``对象，来确保``SFTP Session``不会浪费。因此目前连接池是符合我们预期想要的效果。
+From the above logs, it can be seen that although ``10`` threads all hold the ``same SFTP connection`` information and request connections from the pool in parallel, they will only get ``2 SFTP Session instances`` instead of ``10``. Moreover, when the number of Channel objects held by the ``SSH Session`` in the pool has not yet reached the configured limit of ``5``, the ``same SSH Session instance`` will be allocated. Only when the ``current SSH Session`` object in the pool holds more than ``5`` Channel objects will the next SFTP Session object be allocated, to ensure that SFTP Session is not wasted. Therefore, the connection pool currently meets our expected effects.
  
-## 2.超过服务器``MaxSessions``
+## 2.Exceeding the server's ``MaxSessions``
  
-2.1 服务器配置跟上面一样，``MaxStartups``设置成``2``，``MaxSession``设置成``5``。
+2.1 The server configuration is the same as above, with ``MaxStartups`` set to ``2`` and ``MaxSession`` set to ``5``.
 ```shell
 parallels@ubuntu-linux-22-04-desktop:~$ grep -i "MaxStartups" /etc/ssh/sshd_config
 MaxStartups 2
@@ -500,12 +507,13 @@ parallels@ubuntu-linux-22-04-desktop:~$ grep -i "MaxSessions" /etc/ssh/sshd_conf
 MaxSessions 5
 parallels@ubuntu-linux-22-04-desktop:~$ 
 ```
-2.2 把连接池的数据库配置改成``MaxSession=3，MaxChannel =1`` ，目的是测试当连接池配置的最大``Channel``数大于服务器限制时，程序多个线程并行进行文件处理会不会报错。
+2.2 Change the database configuration of the connection pool to ``MaxSession=3, MaxChannel=1``. The purpose is to test whether the program will report an error when multiple threads process files in parallel, given that the ``maximum Channel number`` in the connection pool configuration exceeds the server's limit.
+
 ```sql
 INSERT INTO SFTP_CONFIG (HOST, PORT, USERNAME, PASSWORD, MAXSESSIONS, MAXCHANNELS) VALUES
 ('192.168.50.57', 22,'parallels', 'test8808', 1, 6);
 ```
-2.3 接下来我们来启动程序，会同时并行开启**6**个线程持有相同的连接信息去访问同一台SFTP 服务器，我们看看程序是否会符合我们预期。如果程序符合预期的话，**6**个线程会同时使用1个``SSH Session``去尝试打开**6**个Channel，第**6**个线程开始打开``Channel``进行文件处理的时候应该会开始报错，因为已经超过了服务器所能承受的 ``MaxSession=5``。
+2.3 Next, we will start the program, which will simultaneously open ``6`` threads with the same connection information to access the same SFTP server. We will see if the program meets our expectations. If the program meets our expectations, ``6`` threads will simultaneously use ``1 SSH Session`` to try to open ``6`` Channels. When the ``6th`` thread starts to open a Channel for file processing, it should begin to report errors, because it has exceeded the server's ``MaxSession=5``.
 ```shell
 2024-03-09 15:30:16.725  INFO 74635 --- [           main] pool.services.SftpService                : config->SftpConfig(id=1, host=192.168.50.57, port=22, username=parallels, password=test8808, maxSessions=1, maxChannels=6)
 2024-03-09 15:30:17.180  INFO 74635 --- [       Thread-6] pool.demo.SftpFileProcessThread          : Thread 38 got session com.jcraft.jsch.Session@63c4e36c. Session detail: 192.168.50.57:parallels
@@ -522,11 +530,11 @@ com.jcraft.jsch.JSchException: channel is not opened.
 	at com.jcraft.jsch.Channel.connect(Channel.java:155) ~[jsch-0.2.16.jar:0.2.16]
 	at pool.demo.SftpFileProcessThread.run(SftpFileProcessThread.java:54) ~[classes/:na]
 ```
-从上面日志可以看到，当超过服务器最大``Channel``配置``5``时，服务器就会开始拒绝请求，符合我们测试预期。因此我们连接池的配置范围一定要小于等于服务器的配置，否则可能会引起文件传输中断，``也就是宁愿少配也不要多配``。
+From the logs above, we can see that when the number of connections exceeds the server's ``maximum Channel`` configuration of ``5``, the server begins to refuse requests, which aligns with our test expectations. Therefore, the configuration range of our connection pool must be less than or equal to the server's configuration; otherwise, it may cause interruptions in file transfers, ``it's better to under-configure rather than over-configure.``
 
-## 3.超过服务器``MaxStartups``
+## 3.Exceeding the server's ``MaxStartups``
  
-3.1 服务器配置跟上面一样，``MaxStartups``设置成``2``，``MaxSession``设置成``5``。
+3.1 The server configuration is the same as above, with ``MaxStartups`` set to ``2`` and ``MaxSession`` set to ``5``.
 ```shell
 parallels@ubuntu-linux-22-04-desktop:~$ grep -i "MaxStartups" /etc/ssh/sshd_config
 MaxStartups 2
@@ -535,17 +543,17 @@ MaxSessions 5
 parallels@ubuntu-linux-22-04-desktop:~$ 
 ```
 
-3.2 把连接池的数据库配置改成``MaxSession=3，MaxChannel =1`` ，目的是测试当连接池配置的最大``Session``数大于服务器限制时，程序多个线程并发创建``SSH Session``是否会出错。
+3.2 Change the database configuration of the connection pool to ``MaxSession=3, MaxChannel=1``, with the aim of testing whether the program will encounter errors when multiple threads concurrently create ``SSH Session`` when the ``maximum Session number`` configured in the connection pool exceeds the server's limit.
 ```sql
 INSERT INTO SFTP_CONFIG (HOST, PORT, USERNAME, PASSWORD, MAXSESSIONS, MAXCHANNELS) VALUES
 ('192.168.50.57', 22,'parallels', 'test8808', 3, 1);
 ```
-3.3 修改``SftpFileProcessThread``代码中获取连接方式改成无锁方式，这样可以看到并发创建``Session``数量超过服务器限制时服务器的报错。因为``MaxStartups``上面我们配置了``2``，需要同时多个线程模拟并发创建超过2个等待验证的``Session``才能看到效果，如果使用有锁模式，创建``Session``就会变成串行，验证通过才会到下一个``Session``，服务器就不会同时有多个等待的验证的``Session``。
+3.3 Modify the code in ``SftpFileProcessThread`` to change the connection method to a lock-free approach, so that we can see the server's error when the number of concurrently created ``Session`` objects exceeds the server's limit. Since we have configured ``MaxStartups`` to ``2``, we need to simulate multiple threads concurrently creating more than ``2 Session`` objects waiting for verification to see the effect. If we use a locking mode, the creation of Session will become serial, and only after verification passes will it proceed to the ``next Session``, so the server ``will not have multiple Session objects`` waiting for verification at the same time.
 ```java
  session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, "");
  //session = pool.getSession(host, port, username, password, 10, TimeUnit.SECONDS, host + ":" + username); //get session with lock
 ```
-3.4 接下来我们来启动程序，会同时并行开启**3**个线程持有相同的连接信息去访问同一台SFTP 服务器，我们看看程序是否会符合我们预期。如果程序符合预期的话，**3**个线程会同时创建3个``SSH Session``，第**3**个线程尝试创建``SSH Session	``时应该会报错，因为超过了服务器最大 并发``Session``数限制``MaxStartups=2``。
+3.4 Next, we will start the program, which will simultaneously open ``3`` threads with the same connection information to access the same SFTP server. Let's see if the program meets our expectations. If the program meets our expectations, ``3`` threads will simultaneously create ``3 SSH Sessions``. When the ``3rd`` thread attempts to create an SSH Session, it should report an error because it exceeds the server's maximum concurrent Session limit ``MaxStartups=2``.
 ```shell
 2024-03-09 15:55:23.367  INFO 7577 --- [           main] pool.services.SftpService                : config->SftpConfig(id=1, host=192.168.50.57, port=22, username=parallels, password=test8808, maxSessions=3, maxChannels=1)
 2024-03-09 15:55:23.455 ERROR 7577 --- [       Thread-5] pool.demo.SftpFileProcessThread          : Thread 37 failed to process
@@ -568,10 +576,10 @@ Caused by: java.net.SocketException: Connection reset
 2024-03-09 15:55:23.900  INFO 7577 --- [       Thread-3] pool.demo.SftpFileProcessThread          : Thread 35 got session com.jcraft.jsch.Session@4777f0b1. Session detail: 192.168.50.57:parallels
 2024-03-09 15:55:23.900  INFO 7577 --- [       Thread-4] pool.demo.SftpFileProcessThread          : Thread 36 got session com.jcraft.jsch.Session@326d5e63. Session detail: 192.168.50.57:parallels
 ```
-从上面日志可以看到，3个线程同一时间只有2个线程能成功创建``Session``，另外一个线程创建``Session``就报错，这是因为超过了服务器最大并发``Session``数限制而被拒绝访问。
+From the logs above, it can be seen that at the same time, only ``2`` out of ``3`` threads can successfully create a ``Session``, while the other thread reports an error when trying to create a ``Session``. This is because it exceeds the server's maximum concurrent ``Session`` limit and is denied access.
 
-# 总结
-我们如果使用这种可配置连接池进行访问，对接上游时最好时最好跟上游确认他们服务器可以承受的``Session``数量和``Channel``数量是多少，宁愿少配也不要多配。但是对于一般上游，如果使用的是Linux服务器，默认值就是上面一开始提到的``MaxSessions=10，MaxStartups=10:30:60``，我们客户端连接池保守配置可以设置成``MaxSession=3，MaxChannel=10``，这样子最大并行可以处理``30``个文件，``MaxSession``一般不建议设置太多，非常消耗系统资源。也有很多上游是使用其他SFTP服务管理工具，但是基本限制参数差不多。以上连接池还有很多需要完善的地方，大家可以根据需要自己进行优化。
+# Summary
+When using a configurable connection pool for access, it's best to confirm with the upstream how many ``Session`` and ``Channel`` numbers their server can handle when connecting to the upstream. It's better to configure less rather than more. However, for general upstreams, if they are using Linux servers, the default values are as mentioned at the beginning: ``MaxSessions=10, MaxStartups=10:30:60``. Our client-side connection pool conservative configuration can be set to ``MaxSession=3, MaxChannel=10``, which can handle up to ``30`` files in parallel. It's generally not recommended to set ``MaxSession`` too high, as it consumes a lot of system resources. Many upstreams use other SFTP service management tools, but the basic limit parameters are similar. There are still many areas in the connection pool that need to be improved, and everyone can optimize it according to their needs.
 
-# Github源代码
+# Github Source Code
 https://github.com/EvanLeung08/sftp-session-pool
