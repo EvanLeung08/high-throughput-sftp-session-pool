@@ -30,6 +30,7 @@ Because our goal is to enhance the parallel file transfer efficiency of our data
 ![](https://img-blog.csdnimg.cn/direct/06ee16e0d91146c5aea298739bfbf06d.png)
 
 **Scenario:**
+
 Delivery Company needs to pick up packages at A Company, which has three packages in its warehouse. A Company has the following access restrictions, and access will be denied if not met:
 1. At the same time, only three couriers from the same logistics company are allowed to enter.
 2. Each worker cannot pick up more than one package.
