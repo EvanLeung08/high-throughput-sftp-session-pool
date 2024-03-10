@@ -85,7 +85,7 @@
 1.	为每台对接的SFTP服务器同一时间不能分配超过``X``个``SSH Session``
 2.	为每台对接的SFTP服务器分配的每个SSH Session最多只能建立``Y``个``SFTP Channel``
 3. 为每台对接的SFTP服务器分配的``SSH Session``连接池是隔离的，不会互相竞争
-4. 多个线程请求获取对某台SFTP服务器``SSH Session``时，如果当前``SSH Session``池中的第一个Session的``SFTP Channel`` 数还没超过``Y``，则会返回同一个``SSH Session``实例，假如当前的``SSH Session``池的第一个``Session``创建的``SFTP Channel``数已经超过配置的``Y``值，则创建第二个``SSH Session``，如此类推，直到创建第N个``SSH Session``，N <``X``
+4. 多个线程请求获取对某台SFTP服务器``SSH Session``时，如果当前``SSH Session``池中的第一个Session的``SFTP Channel`` 数还没超过``Y``，则会返回同一个``SSH Session``实例，假如当前的``SSH Session``池的第一个``Session``创建的``SFTP Channel``数已经超过配置的``Y``值，则创建第二个``SSH Session``，如此类推，直到创建第N个``SSH Session``，N <=``X``
 
 对于每个上游分配的连接池请求流程如下:
 ![AI生产那个的流程图](https://img-blog.csdnimg.cn/direct/179340b78a8d44e7a0a91d341488fd68.png)
@@ -271,39 +271,36 @@ public class SftpSessionPool {
 
 ```
 
-## SftpConnectionBuilder
-为了对接不同的上游，要实现连接池隔离，这里创建一个Builder给调用者，通过不同的Key(``host+port+username)``可以复用独立的连接池，这里是因为考虑到有些SFTP Server是多个用户复用的，不同的用户文件传输需求应该是可以并行处理，因此这里连接池要资源隔离。
+## SftpConnectionPoolFactory
+为了对接不同的上游，要实现连接池隔离，这里创建一个工厂类给调用者，通过不同的Key(``host+port+username)``可以复用独立的连接池，这里是因为考虑到有些SFTP Server是多个用户复用的，不同的用户文件传输需求应该是可以并行处理，因此这里连接池要资源隔离。
 
 ```java
 package pool.common.utils;
 
 import java.util.concurrent.ConcurrentHashMap;
 
-public class SftpConnectionBuilder {
+public class SftpConnectionPoolFactory {
 
-    private static volatile SftpConnectionBuilder instance;
+    private static volatile SftpConnectionPoolFactory instance;
     private ConcurrentHashMap<String, SftpSessionPool> sessionPools;
-    private int maxSessionsPerHost;
-    private int maxChannelsPerSession;
 
-    private SftpConnectionBuilder(int maxSessionsPerHost, int maxChannelsPerSession) {
+
+    private SftpConnectionPoolFactory() {
         this.sessionPools = new ConcurrentHashMap<>();
-        this.maxSessionsPerHost = maxSessionsPerHost;
-        this.maxChannelsPerSession = maxChannelsPerSession;
     }
 
-    public static SftpConnectionBuilder getInstance(int maxSessionsPerHost, int maxChannelsPerSession) {
+    public static SftpConnectionPoolFactory getInstance() {
         if (instance == null) {
-            synchronized (SftpConnectionBuilder.class) {
+            synchronized (SftpConnectionPoolFactory.class) {
                 if (instance == null) {
-                    instance = new SftpConnectionBuilder(maxSessionsPerHost, maxChannelsPerSession);
+                    instance = new SftpConnectionPoolFactory();
                 }
             }
         }
         return instance;
     }
 
-    public SftpSessionPool getSessionPool(String host, int port, String username) {
+    public SftpSessionPool getSessionPool(String host, int port, String username, int maxSessionsPerHost, int maxChannelsPerSession) {
         String key = host + ":" + port + ":" + username;
         return sessionPools.computeIfAbsent(key, k -> new SftpSessionPool(maxSessionsPerHost, maxChannelsPerSession));
     }
@@ -396,7 +393,7 @@ package pool.services;
 
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
-import pool.common.utils.SftpConnectionBuilder;
+import pool.common.utils.SftpConnectionPoolFactory;
 import pool.common.utils.SftpSessionPool;
 import pool.dataobject.SftpConfig;
 import pool.demo.SftpFileProcessThread;
@@ -409,6 +406,7 @@ import java.util.List;
 public class SftpService {
 
     private final SftpConfigRepository sftpConfigRepository;
+    // final static Map<String, SftpSessionPool> map = new ConcurrentHashMap();
 
     public SftpService(SftpConfigRepository sftpConfigRepository) {
         this.sftpConfigRepository = sftpConfigRepository;
@@ -424,8 +422,8 @@ public class SftpService {
         // Initialize a connection pool for each config
         for (SftpConfig config : configs) {
             log.info("config->{}", config);
-
-            SftpSessionPool sessionPool = SftpConnectionBuilder.getInstance(config.getMaxSessions(), config.getMaxChannels()).getSessionPool(config.getHost(), 22, config.getUsername());
+            //map.put(config.getHost() + config.getUsername(), new SftpSessionPool(config.getMaxSessions(), config.getMaxChannels()));
+            SftpSessionPool sessionPool = SftpConnectionPoolFactory.getInstance().getSessionPool(config.getHost(), 22, config.getUsername(), config.getMaxSessions(), config.getMaxChannels());
             //Simulate each sftp profile is being used by multiple threads for file process
             for (int i = 0; i < max_concurrent_opening_files; i++) {
                 SftpFileProcessThread thread = new SftpFileProcessThread(sessionPool, config.getHost(), config.getPort(), config.getUsername(), config.getPassword(), testPath, 0);
@@ -524,7 +522,7 @@ com.jcraft.jsch.JSchException: channel is not opened.
 	at com.jcraft.jsch.Channel.connect(Channel.java:155) ~[jsch-0.2.16.jar:0.2.16]
 	at pool.demo.SftpFileProcessThread.run(SftpFileProcessThread.java:54) ~[classes/:na]
 ```
-从上面日志可以看到，当超过服务器最大``Channel``配置``5``时，服务器就会开始拒绝服务，如何我们测试预期。因此我们连接池的配置范围一定要小于等于服务器的配置，否则可能会引起文件传输中断，``也就是宁愿少配也不要多配``。
+从上面日志可以看到，当超过服务器最大``Channel``配置``5``时，服务器就会开始拒绝请求，符合我们测试预期。因此我们连接池的配置范围一定要小于等于服务器的配置，否则可能会引起文件传输中断，``也就是宁愿少配也不要多配``。
 
 ## 3.超过服务器``MaxStartups``
  
@@ -537,7 +535,7 @@ MaxSessions 5
 parallels@ubuntu-linux-22-04-desktop:~$ 
 ```
 
-3.2 把连接池的数据库配置改成``MaxSession=3，MaxChannel =1`` ，目的测试当连接池配置的最大``Session``数大于服务器限制时，程序多个线程并发创建``SSH Session``会不会出错。
+3.2 把连接池的数据库配置改成``MaxSession=3，MaxChannel =1`` ，目的是测试当连接池配置的最大``Session``数大于服务器限制时，程序多个线程并发创建``SSH Session``是否会出错。
 ```sql
 INSERT INTO SFTP_CONFIG (HOST, PORT, USERNAME, PASSWORD, MAXSESSIONS, MAXCHANNELS) VALUES
 ('192.168.50.57', 22,'parallels', 'test8808', 3, 1);
