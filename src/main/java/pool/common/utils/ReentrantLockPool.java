@@ -7,9 +7,9 @@ import java.util.concurrent.locks.ReentrantLock;
 public class ReentrantLockPool {
     private final ConcurrentHashMap<String, ReentrantLock> lockMap = new ConcurrentHashMap<>();
 
-    public synchronized boolean lock(String key, long timeout, TimeUnit unit) {
+    public  boolean lock(String key, long timeout, TimeUnit unit) {
         ReentrantLock newLock = new ReentrantLock();
-        ReentrantLock existingLock = lockMap.putIfAbsent(key, newLock);
+        ReentrantLock existingLock = lockMap.computeIfAbsent(key, k->newLock);
         ReentrantLock lock = (existingLock == null) ? newLock : existingLock;
         boolean isLocked = false;
         try {
@@ -26,14 +26,14 @@ public class ReentrantLockPool {
         return isLocked;
     }
 
-    public synchronized boolean lock(String key) {
+    public  boolean lock(String key) {
         ReentrantLock newLock = new ReentrantLock();
-        ReentrantLock existingLock = lockMap.putIfAbsent(key, newLock);
+        ReentrantLock existingLock = lockMap.computeIfAbsent(key, k->newLock);
         ReentrantLock lock = (existingLock == null) ? newLock : existingLock;
         return lock.tryLock();
     }
 
-    public synchronized void unlock(String key) {
+    public  void unlock(String key) {
         ReentrantLock lock = lockMap.get(key);
         if (lock != null) {
             lock.unlock();
