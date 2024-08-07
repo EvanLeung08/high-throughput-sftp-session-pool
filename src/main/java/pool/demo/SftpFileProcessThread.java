@@ -3,7 +3,9 @@ package pool.demo;
 import com.jcraft.jsch.ChannelSftp;
 import com.jcraft.jsch.Session;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import pool.common.utils.SftpSessionPool;
+import pool.common.utils.TraceIdUtil;
 import pool.exceptions.NoAvailableSessionException;
 
 import java.util.Vector;
@@ -32,7 +34,16 @@ public class SftpFileProcessThread extends Thread {
     public void run() {
         Session session = null;
         ChannelSftp channelSftp = null;
+
+
+
         try {
+            //获取父线程TraceId
+            String parentTraceId = TraceIdUtil.getTraceId();
+            MDC.put("ParentTraceId", parentTraceId);
+            // 生成一个新的TraceId
+            String traceId = TraceIdUtil.generateTraceId();
+            MDC.put("TraceId", traceId);
             int retries = 0;
             while (true) {
                 try {/**/
@@ -69,6 +80,7 @@ public class SftpFileProcessThread extends Thread {
                 pool.returnOrCloseSession(session);
                 log.info("Thread {} closed session {}. Session detail: {}", this.getId(), session, this.host + ":" + this.username);
             }
+            MDC.clear();
         }
     }
 }

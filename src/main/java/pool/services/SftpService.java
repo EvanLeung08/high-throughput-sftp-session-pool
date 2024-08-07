@@ -1,9 +1,13 @@
 package pool.services;
 
+import com.alibaba.ttl.TtlRunnable;
 import lombok.extern.slf4j.Slf4j;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
+import pool.common.annotations.LogTraceId;
 import pool.common.utils.SftpConnectionPoolFactory;
 import pool.common.utils.SftpSessionPool;
+import pool.common.utils.TraceIdUtil;
 import pool.dataobject.SftpConfig;
 import pool.demo.SftpFileProcessThread;
 import pool.repositories.SftpConfigRepository;
@@ -21,7 +25,9 @@ public class SftpService {
         this.sftpConfigRepository = sftpConfigRepository;
     }
 
+    @LogTraceId
     public void initializeConnectionPools() {
+
         // Load all SFTP configs from the database
         List<SftpConfig> configs = sftpConfigRepository.findAll();
         //Indicate how many files need to be processed in the same time
@@ -35,9 +41,16 @@ public class SftpService {
             SftpSessionPool sessionPool = SftpConnectionPoolFactory.getInstance().getSessionPool(config.getHost(), 22, config.getUsername(), config.getMaxSessions(), config.getMaxChannels());
             //Simulate each sftp profile is being used by multiple threads for file process
             for (int i = 0; i < max_concurrent_opening_files; i++) {
+
+                // log.info("Main thread TraceId:{} ", TraceIdUtil.getTraceId());
                 SftpFileProcessThread thread = new SftpFileProcessThread(sessionPool, config.getHost(), config.getPort(), config.getUsername(), config.getPassword(), testPath, 0);
-                thread.start();
+                // 使用TtlRunnable确保子线程可以获取到父线程的TraceId
+                Runnable ttlRunnable = TtlRunnable.get(thread);
+                new Thread(ttlRunnable).start();
             }
         }
+
+
+
     }
 }

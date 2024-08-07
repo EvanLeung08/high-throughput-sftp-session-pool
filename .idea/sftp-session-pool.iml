@@ -7,9 +7,6 @@
     <facet type="web" name="Web">
       <configuration>
         <webroots />
-        <sourceRoots>
-          <root url="file://$MODULE_DIR$/src/main/java" />
-        </sourceRoots>
       </configuration>
     </facet>
   </component>
@@ -84,5 +81,6 @@
     <orderEntry type="library" scope="RUNTIME" name="Maven: com.h2database:h2:2.1.214" level="project" />
     <orderEntry type="library" name="Maven: com.github.mwiede:jsch:0.2.16" level="project" />
     <orderEntry type="library" name="Maven: org.apache.commons:commons-pool2:2.10.0" level="project" />
+    <orderEntry type="library" name="Maven: com.alibaba:transmittable-thread-local:2.14.5" level="project" />
   </component>
 </module>
